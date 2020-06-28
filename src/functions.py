@@ -1,6 +1,13 @@
 import numpy as np 
 import matplotlib.pyplot as plt
+from sklearn import linear_model
+from sklearn.kernel_ridge import KernelRidge
+from sklearn import model_selection
+from scipy import linalg as la
+from sklearn import preprocessing
+from sklearn.model_selection import cross_val_predict,cross_val_score
 
+# Global variables
 Code_to_text = {'H':"HER",'O':"ORR","S":"Slab","N":"Nanoparticle"}
 target_BE = {'O':-1.143,'H':-0.4915} # Ideal binding energies for ORR ('O')and HER ('H'
 
@@ -205,4 +212,177 @@ def plot_catalytic_activity(df, metalA,metalB,material_type,reaction,ensemble,sh
                        ha="center", va="center", color="w")
     ax.set_title("Cataltyic Ability of "+ Code_to_text[material_type] +"\n for "+ensemble+ " site for the "+ Code_to_text[reaction] +" reaction")
 
- 
+# Compare actual binding energies to weighted average of two metal
+
+def get_predicted_BE_from_keys(df, key):
+    '''
+    Returns predicted binding energy, the weighted average of pure metals 
+    
+    Parameters:
+    key - Dataframe's key 
+    '''
+    key_split = key.split('/')
+    metalA_key = get_pure_key(key_split[1],key_split[0],key_split[5])
+    metalB_key = get_pure_key(key_split[3],key_split[0],key_split[5])
+    predicted_be = (float(key_split[2])*df.loc[metalA_key,'result'] + float(key_split[4])*df.loc[metalB_key,'result']) / 3
+    return predicted_be
+
+def get_actual_and_predicted_arrays(df,reaction,color_sites=0.4):
+    '''
+    Returns np arrays actual and predicted (based on weighted average) of N and S binding energies and mask for coloring data based on distance  
+    
+    Parameters:
+    reaction - 'O' or 'H' for ORR or HER
+    color_sites - if None, data not colored; Otherwise data is colored based on distance moved from binding site which user can select
+    '''
+    df_training = df[(df.M1 != df.M2) & (df.Append == reaction)]
+    df_training = df_training.dropna()
+    slab_ORR_index = df_training.index.to_numpy()
+    actual_BE = np.zeros(len(slab_ORR_index))
+    predicted_BE = np.zeros(len(slab_ORR_index))
+    mask = np.ones(len(slab_ORR_index),dtype=int)
+    for i,index in enumerate(slab_ORR_index):
+        if df.loc[index,'result'] != None:
+            actual_BE[i] = float(df.loc[index,'result'])
+            predicted_BE[i] = get_predicted_BE_from_keys(df,index)
+        if df.loc[index,'distance'] > color_sites:
+            mask[i] = 0
+    return actual_BE, predicted_BE,mask
+
+def plot_predicted_v_actual_BE(reg,df,reaction,color_sites=0.4,ML=None,test_x=None,test_y=None):
+    '''
+    Returns plot of actual versus predicted binding energies and root mean squared error of scheme
+    
+    Parameters:
+    reaction - 'O' or 'H' for ORR or HER
+    color_sites - if None, data not colored; Otherwise data is colored based on distance moved from binding site which user can select
+    ML - if None uses weighted average of pure binding energies to predicted binding energies; else uses ML with parameter reg
+    test_x, test_y - if using ML need to supply test set data to be displayed; x is input y is known output
+    if ML is None, but test_x, test_y are still feed in, this function will plot x (actual) versus y (predicted)
+    '''
+    if (ML == None) and (np.any(test_x) == None):
+        actual_BE, predicted_BE,mask = get_actual_and_predicted_arrays(df, reaction,color_sites=color_sites)
+    elif ML == None:
+        actual_BE, predicted_BE = test_x,test_y
+        mask = np.ones(len(actual_BE))
+    else:
+        actual_BE, predicted_BE = get_actual_versus_predicted_data_ML(reg,test_x,test_y) 
+        mask = np.ones(len(actual_BE))
+    fig, ax = plt.subplots()
+    scale = 20
+    ax.scatter(actual_BE,predicted_BE,s=scale*mask,label='distance < '+str(color_sites))
+    ax.scatter(actual_BE,predicted_BE,s=list(map(lambda x: scale*((x+1)%2),mask)),label='distance >= '+str(color_sites))
+    ax.plot([np.amin(actual_BE),np.amax(actual_BE)],[np.amin(actual_BE),np.amax(actual_BE)],c='k')
+    ax.legend()
+    ax.set_xlabel('Actual Binding Energy (eV)')
+    ax.set_ylabel('Predicted Binding Energy (eV)')
+    ax.set_title("Actual versus Predicted Binding Energy")
+    return np.sqrt(np.sum(np.power((actual_BE-predicted_BE),2))/len(actual_BE) )# returns root mean square error of binding 
+
+
+# Get training data
+
+def get_pure_be_for_ts(df_training,feature,reaction,df_pure):
+    '''
+    Returns a np array of pure binding energies from a pandas dataframe.
+    The pure binding energies are used as a feature for ML. 
+    
+    Parameters:
+    df_training - pandas dataframe for training set
+    feature - M1 or M2 
+    df_pure -pandas dataframe of df_pure binding energies only 
+    '''
+    training_data = np.zeros(len(df_training))
+    for i,key in enumerate(df_training.index):
+        training_data[i] = df_pure.loc[get_pure_key(df_training.loc[key,feature],df_training.loc[key,'S_N'],reaction),'result']
+    return training_data
+
+def get_all_training_data(df,reaction,features,add_weighted_be=False):
+    '''
+    Creates training data as a np array 
+    
+    Parameters:
+    feature - features used as for ML; if M1 or M2 the pure binding energies are used as numerical feature 
+    add_weighted_be - if True 
+    '''
+    df_training = df[(df.M1 != df.M2) & (df.Append == reaction)]
+    df_training = df_training.dropna()
+    df_pure = df[(df.M1 == df.M2) & (df.Append == reaction)]
+    training_data = np.zeros((len(df_training),len(features)))
+    for i,feature in enumerate(features): 
+        if feature == 'M1' or feature == 'M2':
+            training_data[:,i] = get_pure_be_for_ts(df_training,feature,reaction,df_pure)
+        else:
+            training_data[:,i] = df_training[feature].to_numpy()
+    if add_weighted_be:
+        # probably could be more efficiently coded as well 
+        td, to = get_all_training_data(df,reaction,['M1','M2','SiteA','SiteB'])
+        new_training_data = np.zeros((len(training_data),2))
+        new_training_data[:,0] = td[:,0]*td[:,2]
+        new_training_data[:,1] = td[:,1]*td[:,3]
+        training_data = np.append(training_data, new_training_data,axis=1)
+    # Edit so that can get Weighted BE based on 
+    training_output = df_training['result'].to_numpy()
+    return training_data, training_output
+
+# Functions for Training
+
+def train_with_scikits(X_All,y_all,ML_method,split = True):
+    '''
+    Returns trained ML model and testing set 
+    
+    Parameters:
+    X_All, y_all - training set for ML 
+    ML_method - scikits ML method 
+    '''
+    if split == True:
+        train_x,test_x,train_y,test_y = model_selection.train_test_split(X_All, y_all, train_size=0.7)
+        reg = ML_method
+        reg.fit(train_x,train_y)
+        return reg, test_x, test_y
+    else:
+        reg = ML_method
+        reg.fit(X_All,y_all)
+        return reg, None, None
+
+def get_actual_versus_predicted_data_ML(reg,test_x,test_y):
+    '''
+    Returns output from test set for actual and predicted 
+    
+    Parameters:
+    test_x, test_y - test set 
+    reg - trained ML model
+    '''
+    test_predicted = reg.predict(test_x)
+    return test_y,test_predicted
+
+# Exploring Ridge Regression and Varying Alpha
+
+def plot_ridge_coefficients_performance_on_scaled_data(X_all, y_all,features):
+    # normalize data to [0,1]
+    min_max_scaler = preprocessing.MinMaxScaler()
+    X_all_scaled = min_max_scaler.fit_transform(X_all)
+    # initialize variables
+    alphas = np.linspace(0.01,10.01,101)
+    coef_matrix = np.zeros((len(alphas),len(features)))
+    performance = np.zeros(len(alphas))
+    # train on all alpha values and store output
+    for i,alpha in enumerate(alphas):
+        reg, test_x,test_y = train_with_scikits(X_all_scaled,y_all,linear_model.Ridge(alpha= alpha),split=False)   #KernelRidge(alpha=0.5))
+        coef_matrix[i] = reg.coef_
+        performance[i] = cross_val_score(linear_model.Ridge(alpha= alpha),X_all, y_all,cv =5).mean() #np.sqrt(np.sum(np.power((test_y-reg.predict(test_x)),2))/len(test_y) )#reg.score(test_x,test_y) 
+
+    # plot regression coefficients versus alpha values
+    fig, ax = plt.subplots(dpi=120)
+#    sb.set_style("whitegrid")
+    for i in range(len(features)):
+        ax.plot(alphas,coef_matrix[:,i],label=features[i])
+    ax.legend(loc='center left', bbox_to_anchor=(1, 0.5))
+    ax.set_xlabel('Alpha')
+    ax.set_ylabel('Coefficient in Regression Model')
+    #ax.set_ylim([-5.0,5.0])
+    # plot 
+    fig, ax = plt.subplots(dpi=120)
+    ax.plot(alphas,performance)
+    ax.set_xlabel('Alpha')
+    ax.set_ylabel('Cross Validation (k=5) Score') #Root Mean Squared Error (eV)')
