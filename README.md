@@ -12,4 +12,3 @@ http://fri.oden.utexas.edu/~fri/fridb/server.py
 
 This repo contains the data accumulated from this project in the bimetallic_data.json.  It also includes a jupyter notebook that displays and analysis the data accumulated and applies machine learning and statistical methods to predict binding energies of new bimetallic materials
 
-![](img/ensemble.png)
