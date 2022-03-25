@@ -1,4 +1,4 @@
-# Bimetallic Materials for Catalysis Database Analysis
+# Bimetallic Materials for Catalysis: Database Analysis
 
 ## Project Overview 
 
